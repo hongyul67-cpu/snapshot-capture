@@ -594,9 +594,22 @@ class CaptureApp:
             try:
                 self.fixed_border = InteractiveRegion(
                     self.root, self.interval_region,
-                    on_change=self._on_fixed_region_changed)
+                    on_change=self._on_fixed_region_changed,
+                    on_close=self._close_fixed_border)
             except Exception:
                 self.fixed_border = None
+
+    def _close_fixed_border(self):
+        """테두리의 ✕ 버튼 → 상시 테두리 끄기(체크 해제) + 제거"""
+        try:
+            self.show_fixed_border_var.set(False)
+        except Exception:
+            pass
+        if self.fixed_border:
+            self.fixed_border.destroy()
+            self.fixed_border = None
+        save_config(self._collect_cfg())
+        self.set_status("고정 영역 테두리 닫음 (🔴테두리 체크로 다시 표시)", C_SUB)
 
     def _on_fixed_region_changed(self, region):
         """화면 테두리를 드래그로 이동/크기변경했을 때 고정 영역 갱신·저장"""
@@ -789,6 +802,13 @@ class CaptureApp:
     def set_status(self, text, color=C_SUB):
         self.status.configure(text=text, fg=color)
 
+    def _safe_after(self, fn):
+        """다른 스레드/종료 후에도 안전하게 메인루프로 콜백 예약"""
+        try:
+            self.root.after(0, fn)
+        except Exception:
+            pass
+
     # ------------------------------------------------------------------
     # 대상 → region 계산
     # ------------------------------------------------------------------
@@ -971,7 +991,7 @@ class CaptureApp:
         path = next_filename(self.cfg, ext)
         self.recorder = VideoRecorder(
             region, self.cfg["video_fps"], path,
-            on_state=lambda s: self.root.after(0, lambda: self._on_video_state(s, path)))
+            on_state=lambda s: self._safe_after(lambda: self._on_video_state(s, path)))
         self.recorder.start()
         self.recording = True
         # 촬영 영역 빨간 테두리 (고정 영역 상시 테두리가 이미 있으면 중복 생략)
@@ -1256,10 +1276,11 @@ class InteractiveRegion:
                "sw": "size_ne_sw", "n": "sb_v_double_arrow", "s": "sb_v_double_arrow",
                "w": "sb_h_double_arrow", "e": "sb_h_double_arrow"}
 
-    def __init__(self, root, region, on_change=None):
+    def __init__(self, root, region, on_change=None, on_close=None):
         self.root = root
         self.region = dict(region)
         self.on_change = on_change
+        self.on_close = on_close
         self.windows = []
         self.strips = []          # 캡처 시 숨김 대상(호환용)
         self.edges = {}
@@ -1277,7 +1298,21 @@ class InteractiveRegion:
             h.bind("<B1-Motion>", self._do_resize)
             h.bind("<ButtonRelease-1>", self._end)
             self.handles[name] = h
+        # 닫기(✕) 버튼 — 우상단 바깥
+        self.closebtn = tk.Toplevel(self.root)
+        self.closebtn.overrideredirect(True)
+        self.closebtn.attributes("-topmost", True)
+        clbl = tk.Label(self.closebtn, text="✕", bg="#ef4444", fg="#ffffff",
+                        font=("Segoe UI", 10, "bold"), cursor="hand2")
+        clbl.pack(fill="both", expand=True)
+        clbl.bind("<Button-1>", lambda e: self._close())
+        self.windows.append(self.closebtn)
+        self.strips.append(self.closebtn)
         self._reposition()
+
+    def _close(self):
+        if self.on_close:
+            self.on_close()
 
     def _mkwin(self, color, cursor):
         w = tk.Toplevel(self.root)
@@ -1304,6 +1339,8 @@ class InteractiveRegion:
                "e": (l + ww, t + hh // 2)}
         for name, (x, y) in pts.items():
             self.handles[name].geometry(f"{2 * hs}x{2 * hs}+{x - hs}+{y - hs}")
+        # 닫기 버튼: 우상단 모서리 바깥쪽
+        self.closebtn.geometry(f"24x24+{l + ww + k + 2}+{t - k - 24}")
 
     def _start_move(self, e):
         self._drag = ("move", None, e.x_root, e.y_root, dict(self.region))

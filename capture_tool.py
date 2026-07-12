@@ -41,6 +41,7 @@ DEFAULT_CONFIG = {
     "hide_window_on_capture": True,
     "interval_seconds": 5,
     "interval_target": "전체화면",
+    "interval_region": None,        # "지정 영역" 대상일 때 저장되는 좌표
     "video_fps": 15,
     "video_target": "전체화면",
     "hotkeys": {
@@ -255,6 +256,7 @@ class CaptureApp:
         self._interval_after = None
         self.hotkey_listener = None
         self._recording_edit = None  # 단축키 편집중인 필드
+        self.interval_region = self.cfg.get("interval_region")  # 연속 캡처 지정 영역
 
         root.title("SnapShot — 화면 캡처")
         root.configure(bg=C_BG)
@@ -394,9 +396,12 @@ class CaptureApp:
         tk.Label(irow, text="대상:", bg=C_CARD, fg=C_SUB,
                  font=("Segoe UI", 9)).pack(side="left")
         self.interval_target_var = tk.StringVar(value=self.cfg.get("interval_target", "전체화면"))
-        itargets = ["전체화면", "활성창"] + self.monitor_choices
+        itargets = ["전체화면", "활성창", "지정 영역"] + self.monitor_choices
         ttk.Combobox(irow, values=itargets, textvariable=self.interval_target_var,
                      state="readonly", width=8, font=("Segoe UI", 9)).pack(side="left", padx=4)
+        self._mkbtn(irow, "📍 영역 지정", lambda: self.set_interval_region(),
+                    bg=C_CARD2, hover=C_ACCENT, font=("Segoe UI", 9),
+                    pad=(0, 5)).pack(side="left", padx=(2, 0))
 
         # ---- 저장 설정 ----
         scard = self._card(root, "저장 설정")
@@ -600,6 +605,7 @@ class CaptureApp:
             "hide_window_on_capture": bool(self.hide_var.get()),
             "interval_seconds": interval,
             "interval_target": self.interval_target_var.get(),
+            "interval_region": self.interval_region,
             "video_fps": fps,
             "video_target": self.video_target_var.get(),
             "monitor_index": mon_idx,
@@ -624,6 +630,8 @@ class CaptureApp:
         if target == "활성창":
             r = get_active_window_rect()
             return r
+        if target == "지정 영역":
+            return dict(self.interval_region) if self.interval_region else None
         if target.startswith("모니터"):
             try:
                 idx = int(target.split()[-1])
@@ -695,13 +703,40 @@ class CaptureApp:
         self._capture_with_hide(self._selected_monitor_region)
 
     def capture_region(self):
-        RegionSelector(self.root, self._on_region_selected)
+        # 선택하는 동안 본 프로그램 창을 숨김 → 캡처에 앱이 안 잡히도록
+        self.root.withdraw()
+        self.root.after(160, lambda: RegionSelector(self.root, self._on_region_selected))
 
     def _on_region_selected(self, region):
         if region:
-            self._do_capture(region, flash=True)
+            # 오버레이가 완전히 사라진 뒤 캡처(잔상 방지)
+            self.root.after(80, lambda: self._finish_region(region))
         else:
+            self.root.deiconify()
             self.set_status("영역 선택 취소됨")
+
+    def _finish_region(self, region):
+        self._do_capture(region, flash=True)
+        self.root.deiconify()
+
+    def set_interval_region(self, then_start=False):
+        """연속 캡처용 '지정 영역'을 드래그로 설정 (창 숨김 상태로 선택)"""
+        self.root.withdraw()
+
+        def cb(region):
+            self.root.deiconify()
+            if region:
+                self.interval_region = region
+                self.interval_target_var.set("지정 영역")
+                save_config(self._collect_cfg())
+                self.set_status(
+                    f"지정 영역 설정됨 · {region['width']}×{region['height']}", C_GREEN)
+                if then_start:
+                    self.start_interval()
+            else:
+                self.set_status("영역 지정 취소됨")
+
+        self.root.after(160, lambda: RegionSelector(self.root, cb))
 
     # ------------------------------------------------------------------
     # 캡처 모션 (플래시)
@@ -779,6 +814,11 @@ class CaptureApp:
 
     def start_interval(self):
         self._collect_cfg()
+        # '지정 영역' 대상인데 아직 영역이 없으면 먼저 지정받고 시작
+        if self.interval_target_var.get() == "지정 영역" and not self.interval_region:
+            self.set_status("먼저 캡처할 영역을 드래그하세요")
+            self.set_interval_region(then_start=True)
+            return
         self.interval_running = True
         self.interval_btn.configure(text="■  정지", bg=C_GREEN, fg="#ffffff")
         self.interval_btn._base_bg = C_GREEN

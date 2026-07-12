@@ -575,6 +575,12 @@ class CaptureApp:
     # ------------------------------------------------------------------
     # 고정 영역 상시 테두리
     # ------------------------------------------------------------------
+    def _suspend_fixed_border(self):
+        """편집/캡처 중 상시 테두리를 잠시 제거(설정은 유지 → 이후 _refresh로 복원)"""
+        if self.fixed_border:
+            self.fixed_border.destroy()
+            self.fixed_border = None
+
     def _refresh_fixed_border(self):
         """고정 영역이 있고 체크되어 있으면 상시 빨간 테두리 표시/갱신"""
         if self.fixed_border:
@@ -868,9 +874,10 @@ class CaptureApp:
         self._capture_with_hide(lambda: dict(self.interval_region))
 
     def capture_region(self):
-        # 선택하는 동안 본 프로그램 창을 숨김 → 캡처에 앱이 안 잡히도록
+        # 선택하는 동안 본 프로그램 창/고정 테두리를 숨김 → 캡처에 안 잡히도록
+        self._suspend_fixed_border()
         self.root.withdraw()
-        self.root.after(160, lambda: RegionSelector(self.root, self._on_region_selected))
+        self.root.after(160, lambda: RegionEditor(self.root, self._on_region_selected))
 
     def _on_region_selected(self, region):
         if region:
@@ -878,6 +885,7 @@ class CaptureApp:
             self.root.after(80, lambda: self._finish_region(region))
         else:
             self.root.deiconify()
+            self._refresh_fixed_border()
             self.set_status("영역 선택 취소됨")
 
     def _finish_region(self, region):
@@ -889,7 +897,9 @@ class CaptureApp:
         self.root.deiconify()
 
     def set_fixed_region(self, then=None):
-        """공유 '지정(고정) 영역'을 드래그로 설정. then: 설정 후 실행할 콜백."""
+        """공유 '지정(고정) 영역'을 편집. 기존 영역이 있으면 그걸 불러와 이동/크기조절."""
+        self._suspend_fixed_border()
+        start = dict(self.interval_region) if self.interval_region else None
         self.root.withdraw()
 
         def cb(region):
@@ -903,9 +913,10 @@ class CaptureApp:
                 if then:
                     then()
             else:
+                self._refresh_fixed_border()
                 self.set_status("영역 고정 취소됨")
 
-        self.root.after(160, lambda: RegionSelector(self.root, cb))
+        self.root.after(160, lambda: RegionEditor(self.root, cb, region=start))
 
     # ------------------------------------------------------------------
     # 캡처 모션 (플래시)
@@ -1160,65 +1171,178 @@ class Tooltip:
 
 
 # ----------------------------------------------------------------------
-# 영역 선택 오버레이 (가상 데스크톱 전체 커버)
+# 영역 편집기: 드래그로 만들고, 안쪽 드래그로 이동 / 모서리로 크기조절 후 확정
 # ----------------------------------------------------------------------
-class RegionSelector:
-    def __init__(self, root, callback):
+class RegionEditor:
+    TOL = 12  # 핸들 클릭 허용 반경
+    CURSORS = {"nw": "size_nw_se", "se": "size_nw_se", "ne": "size_ne_sw",
+               "sw": "size_ne_sw", "n": "sb_v_double_arrow", "s": "sb_v_double_arrow",
+               "w": "sb_h_double_arrow", "e": "sb_h_double_arrow"}
+
+    def __init__(self, root, callback, region=None):
         self.callback = callback
+        self.done = False
         mons = get_monitors()
         v = mons[0]  # 가상 데스크톱 전체
         self.vx, self.vy = v["left"], v["top"]
+        self.W, self.H = v["width"], v["height"]
 
         self.top = tk.Toplevel(root)
         self.top.overrideredirect(True)
         self.top.attributes("-topmost", True)
-        self.top.geometry(f"{v['width']}x{v['height']}+{v['left']}+{v['top']}")
-        self.top.attributes("-alpha", 0.3)
-        self.top.configure(bg="black", cursor="crosshair")
+        self.top.geometry(f"{self.W}x{self.H}+{v['left']}+{v['top']}")
+        self.top.attributes("-alpha", 0.35)
+        self.top.configure(bg="black")
 
         self.canvas = tk.Canvas(self.top, bg="black", highlightthickness=0,
-                                width=v["width"], height=v["height"])
+                                width=self.W, height=self.H, cursor="crosshair")
         self.canvas.pack(fill="both", expand=True)
-        self.canvas.create_text(
-            v["width"] // 2, 40,
-            text="드래그하여 영역 선택  ·  ESC 취소",
-            fill="#e2e8f0", font=("Segoe UI", 13))
 
-        self.start = None
-        self.rect = None
-        self.canvas.bind("<Button-1>", self._down)
-        self.canvas.bind("<B1-Motion>", self._move)
-        self.canvas.bind("<ButtonRelease-1>", self._up)
+        # 사각형 (canvas 좌표) [x1, y1, x2, y2]
+        if region:
+            x1 = region["left"] - self.vx
+            y1 = region["top"] - self.vy
+            self.rect = [x1, y1, x1 + region["width"], y1 + region["height"]]
+        else:
+            self.rect = None
+        self.mode = None
+        self.handle = None
+        self.press = None
+        self.orig = None
+
+        self.canvas.create_text(
+            self.W // 2, 34,
+            text="드래그로 영역 지정 · 안쪽 드래그로 이동 · 모서리로 크기조절 · "
+                 "Enter/더블클릭 확정 · ESC 취소",
+            fill="#e2e8f0", font=("Segoe UI", 12))
+        okb = tk.Label(self.canvas, text="✓ 확인", bg=C_GREEN, fg="#ffffff",
+                       font=("Segoe UI", 10, "bold"), padx=14, pady=6, cursor="hand2")
+        okb.bind("<Button-1>", lambda e: self._confirm())
+        self.canvas.create_window(self.W // 2 - 60, 66, window=okb)
+        cxb = tk.Label(self.canvas, text="✕ 취소", bg=C_RED, fg="#ffffff",
+                       font=("Segoe UI", 10, "bold"), padx=14, pady=6, cursor="hand2")
+        cxb.bind("<Button-1>", lambda e: self._cancel())
+        self.canvas.create_window(self.W // 2 + 60, 66, window=cxb)
+
+        self.canvas.bind("<ButtonPress-1>", self._down)
+        self.canvas.bind("<B1-Motion>", self._drag)
+        self.canvas.bind("<ButtonRelease-1>", self._release)
+        self.canvas.bind("<Motion>", self._hover)
+        self.canvas.bind("<Double-Button-1>", lambda e: self._confirm())
         self.top.bind("<Escape>", lambda e: self._cancel())
+        self.top.bind("<Return>", lambda e: self._confirm())
         self.top.focus_force()
+        self._redraw()
+
+    def _norm(self):
+        if not self.rect:
+            return None
+        x1, y1, x2, y2 = self.rect
+        return [min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)]
+
+    def _handles(self):
+        r = self._norm()
+        if not r:
+            return {}
+        x1, y1, x2, y2 = r
+        mx, my = (x1 + x2) / 2, (y1 + y2) / 2
+        return {"nw": (x1, y1), "ne": (x2, y1), "sw": (x1, y2), "se": (x2, y2),
+                "n": (mx, y1), "s": (mx, y2), "w": (x1, my), "e": (x2, my)}
+
+    def _hit_handle(self, x, y):
+        for name, (hx, hy) in self._handles().items():
+            if abs(x - hx) <= self.TOL and abs(y - hy) <= self.TOL:
+                return name
+        return None
+
+    def _inside(self, x, y):
+        r = self._norm()
+        if not r:
+            return False
+        return r[0] <= x <= r[2] and r[1] <= y <= r[3]
+
+    def _hover(self, e):
+        if self.mode:
+            return
+        h = self._hit_handle(e.x, e.y) if self.rect else None
+        if h:
+            self.canvas.configure(cursor=self.CURSORS.get(h, "crosshair"))
+        elif self._inside(e.x, e.y):
+            self.canvas.configure(cursor="fleur")
+        else:
+            self.canvas.configure(cursor="crosshair")
 
     def _down(self, e):
-        self.start = (e.x, e.y)
-        if self.rect:
-            self.canvas.delete(self.rect)
-        self.rect = self.canvas.create_rectangle(e.x, e.y, e.x, e.y,
-                                                 outline=C_ACCENT_H, width=2)
+        self.press = (e.x, e.y)
+        h = self._hit_handle(e.x, e.y) if self.rect else None
+        if h:
+            self.mode, self.handle, self.orig = "resize", h, self._norm()
+        elif self.rect and self._inside(e.x, e.y):
+            self.mode, self.orig = "move", self._norm()
+        else:
+            self.mode, self.rect, self.orig = "new", [e.x, e.y, e.x, e.y], None
 
-    def _move(self, e):
-        if self.start and self.rect:
-            self.canvas.coords(self.rect, self.start[0], self.start[1], e.x, e.y)
-
-    def _up(self, e):
-        if not self.start:
-            return self._cancel()
-        x1, y1 = self.start
-        x2, y2 = e.x, e.y
-        left, top = min(x1, x2), min(y1, y2)
-        w, h = abs(x2 - x1), abs(y2 - y1)
-        self.top.destroy()
-        if w < 5 or h < 5:
-            self.callback(None)
+    def _drag(self, e):
+        if not self.mode:
             return
-        region = {"left": self.vx + left, "top": self.vy + top,
-                  "width": w, "height": h}
-        self.callback(region)
+        dx, dy = e.x - self.press[0], e.y - self.press[1]
+        if self.mode == "new":
+            self.rect[2], self.rect[3] = e.x, e.y
+        elif self.mode == "move":
+            x1, y1, x2, y2 = self.orig
+            self.rect = [x1 + dx, y1 + dy, x2 + dx, y2 + dy]
+        elif self.mode == "resize":
+            x1, y1, x2, y2 = self.orig
+            h = self.handle
+            if "n" in h:
+                y1 += dy
+            if "s" in h:
+                y2 += dy
+            if "w" in h:
+                x1 += dx
+            if "e" in h:
+                x2 += dx
+            self.rect = [x1, y1, x2, y2]
+        self._redraw()
+
+    def _release(self, e):
+        self.mode = self.handle = None
+        if self.rect:
+            self.rect = self._norm()
+        self._redraw()
+
+    def _redraw(self):
+        self.canvas.delete("shape")
+        r = self._norm()
+        if not r:
+            return
+        x1, y1, x2, y2 = r
+        self.canvas.create_rectangle(x1, y1, x2, y2, outline="#ff2d2d",
+                                     width=2, tags="shape")
+        for name, (hx, hy) in self._handles().items():
+            self.canvas.create_rectangle(hx - 5, hy - 5, hx + 5, hy + 5,
+                                         fill="#ffffff", outline="#ff2d2d",
+                                         tags="shape")
+        self.canvas.create_text((x1 + x2) / 2, max(y1 - 14, 12),
+                                text=f"{int(x2 - x1)} × {int(y2 - y1)}",
+                                fill="#ffffff", font=("Segoe UI", 11, "bold"),
+                                tags="shape")
+
+    def _confirm(self):
+        if self.done:
+            return
+        r = self._norm()
+        if not r or (r[2] - r[0]) < 5 or (r[3] - r[1]) < 5:
+            return  # 유효한 영역이 없으면 무시
+        self.done = True
+        self.top.destroy()
+        self.callback({"left": int(self.vx + r[0]), "top": int(self.vy + r[1]),
+                       "width": int(r[2] - r[0]), "height": int(r[3] - r[1])})
 
     def _cancel(self):
+        if self.done:
+            return
+        self.done = True
         self.top.destroy()
         self.callback(None)
 

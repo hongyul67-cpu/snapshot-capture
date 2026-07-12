@@ -1,0 +1,11 @@
+# 가상환경 / 빌드 산출물
+.venv/
+build/
+dist/
+__pycache__/
+*.pyc
+*.spec
+
+# 앱 설정/테스트 산출물
+_selftest.*
+_test_out/

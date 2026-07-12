@@ -1,0 +1,5 @@
+mss
+Pillow
+pynput
+imageio-ffmpeg
+pyinstaller

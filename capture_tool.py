@@ -42,6 +42,7 @@ DEFAULT_CONFIG = {
     "interval_seconds": 5,
     "interval_target": "전체화면",
     "interval_region": None,        # "지정 영역" 대상일 때 저장되는 좌표
+    "show_fixed_border": True,      # 고정 영역 빨간 테두리 항상 표시
     "video_fps": 15,
     "video_target": "전체화면",
     "hotkeys": {
@@ -260,6 +261,7 @@ class CaptureApp:
         self.mini_mode = False
         self.video_border = None      # 녹화 중 빨간 테두리
         self.interval_border = None   # 연속 캡처 중 빨간 테두리
+        self.fixed_border = None      # 고정 영역 상시 빨간 테두리
 
         root.title("SnapShot — 화면 캡처")
         root.configure(bg=C_BG)
@@ -280,6 +282,9 @@ class CaptureApp:
         x = (root.winfo_screenwidth() - w) // 2
         y = (root.winfo_screenheight() - h) // 3
         root.geometry(f"+{x}+{y}")
+
+        # 저장된 고정 영역이 있으면 상시 테두리 표시
+        self._refresh_fixed_border()
 
     # ------------------------------------------------------------------
     def _build_style(self):
@@ -410,6 +415,13 @@ class CaptureApp:
         self._mkbtn(irow, "📍 영역 고정", lambda: self.set_fixed_region(),
                     bg=C_CARD2, hover=C_ACCENT, font=("Segoe UI", 9),
                     pad=(0, 5)).pack(side="left", padx=(2, 0))
+        self.show_fixed_border_var = tk.BooleanVar(
+            value=self.cfg.get("show_fixed_border", True))
+        tk.Checkbutton(irow, text="🔴테두리", variable=self.show_fixed_border_var,
+                       command=self._refresh_fixed_border, bg=C_CARD, fg=C_SUB,
+                       selectcolor=C_CARD2, activebackground=C_CARD,
+                       activeforeground=C_TEXT, font=("Segoe UI", 9),
+                       highlightthickness=0, bd=0).pack(side="left", padx=(4, 0))
 
         # ---- 저장 설정 ----
         scard = self._card(root, "저장 설정")
@@ -486,17 +498,24 @@ class CaptureApp:
         bar.pack(fill="both", expand=True, padx=6, pady=6)
         tk.Label(bar, text="📸", bg=C_BG, fg=C_TEXT,
                  font=("Segoe UI", 13)).pack(side="left", padx=(2, 6))
-        for txt, cmd in [("⬚", self.capture_region), ("🖥", self.capture_fullscreen),
-                         ("🪟", self.capture_window)]:
-            self._mkbtn(bar, txt, cmd, font=("Segoe UI", 12), pad=(0, 5)).pack(side="left", padx=2)
+        for txt, cmd, tip in [("⬚", self.capture_region, "영역 선택 캡처"),
+                              ("🖥", self.capture_fullscreen, "전체 화면 캡처"),
+                              ("🪟", self.capture_window, "활성 창 캡처")]:
+            b = self._mkbtn(bar, txt, cmd, font=("Segoe UI", 12), pad=(0, 5))
+            b.pack(side="left", padx=2)
+            Tooltip(b, tip)
         self.mini_video_btn = self._mkbtn(bar, "●", self.toggle_video, hover=C_RED,
                                           font=("Segoe UI", 12, "bold"), pad=(0, 5))
         self.mini_video_btn.pack(side="left", padx=2)
+        Tooltip(self.mini_video_btn, "동영상 녹화 시작 / 정지")
         self.mini_interval_btn = self._mkbtn(bar, "▶", self.toggle_interval, hover=C_GREEN,
                                              font=("Segoe UI", 12, "bold"), pad=(0, 5))
         self.mini_interval_btn.pack(side="left", padx=2)
-        self._mkbtn(bar, "⤢", self.toggle_mini, hover=C_ACCENT,
-                    font=("Segoe UI", 12), pad=(0, 5)).pack(side="right", padx=2)
+        Tooltip(self.mini_interval_btn, "연속 캡처 시작 / 정지")
+        exp = self._mkbtn(bar, "⤢", self.toggle_mini, hover=C_ACCENT,
+                          font=("Segoe UI", 12), pad=(0, 5))
+        exp.pack(side="right", padx=2)
+        Tooltip(exp, "원래 크기로 복원")
 
     # ------------------------------------------------------------------
     # 미니(요약) 모드
@@ -544,6 +563,49 @@ class CaptureApp:
             os.startfile(d)
         except Exception as e:
             self.set_status(f"폴더 열기 실패: {e}", C_RED)
+
+    # ------------------------------------------------------------------
+    # 고정 영역 상시 테두리
+    # ------------------------------------------------------------------
+    def _refresh_fixed_border(self):
+        """고정 영역이 있고 체크되어 있으면 상시 빨간 테두리 표시/갱신"""
+        if self.fixed_border:
+            self.fixed_border.destroy()
+            self.fixed_border = None
+        try:
+            on = self.show_fixed_border_var.get()
+        except Exception:
+            on = True
+        if on and self.interval_region:
+            try:
+                self.fixed_border = RedBorder(self.root, self.interval_region)
+            except Exception:
+                self.fixed_border = None
+
+    def _hide_borders_for_grab(self):
+        """캡처 순간, 화면의 빨간 테두리들이 이미지에 안 찍히게 잠깐 숨김"""
+        hidden = []
+        for b in (self.fixed_border, self.video_border, self.interval_border):
+            if b:
+                for s in b.strips:
+                    try:
+                        if s.winfo_ismapped():
+                            s.withdraw()
+                            hidden.append(s)
+                    except Exception:
+                        pass
+        if hidden:
+            self.root.update_idletasks()
+            self.root.update()
+        return hidden
+
+    def _restore_borders(self, hidden):
+        for s in hidden:
+            try:
+                s.deiconify()
+                s.attributes("-topmost", True)
+            except Exception:
+                pass
 
     def _add_placeholder(self, entry, var, text):
         def on_focus_in(e):
@@ -681,11 +743,18 @@ class CaptureApp:
             "interval_seconds": interval,
             "interval_target": self.interval_target_var.get(),
             "interval_region": self.interval_region,
+            "show_fixed_border": bool(self._safe_border_var()),
             "video_fps": fps,
             "video_target": self.video_target_var.get(),
             "monitor_index": mon_idx,
         })
         return self.cfg
+
+    def _safe_border_var(self):
+        try:
+            return self.show_fixed_border_var.get()
+        except Exception:
+            return self.cfg.get("show_fixed_border", True)
 
     def browse_dir(self):
         d = filedialog.askdirectory(initialdir=self.dir_var.get())
@@ -738,7 +807,11 @@ class CaptureApp:
         ext = self.cfg["img_format"]
         pil_ext = "JPEG" if ext == "jpg" else "PNG"
         try:
-            img = grab_region(region)
+            hidden = self._hide_borders_for_grab()
+            try:
+                img = grab_region(region)
+            finally:
+                self._restore_borders(hidden)
             path = next_filename(self.cfg, ext)
             if pil_ext == "JPEG":
                 img = img.convert("RGB")
@@ -795,6 +868,7 @@ class CaptureApp:
         # 방금 선택한 영역을 '고정 영역'으로 저장 → 영상/연속에서 재사용(고정 유지)
         self.interval_region = region
         save_config(self._collect_cfg())
+        self._refresh_fixed_border()
         self.root.deiconify()
 
     def set_fixed_region(self, then=None):
@@ -806,6 +880,7 @@ class CaptureApp:
             if region:
                 self.interval_region = region
                 save_config(self._collect_cfg())
+                self._refresh_fixed_border()
                 self.set_status(
                     f"영역 고정됨 · {region['width']}×{region['height']}", C_GREEN)
                 if then:
@@ -865,7 +940,9 @@ class CaptureApp:
             on_state=lambda s: self.root.after(0, lambda: self._on_video_state(s, path)))
         self.recorder.start()
         self.recording = True
-        self.video_border = RedBorder(self.root, region)  # 촬영 영역 빨간 테두리
+        # 촬영 영역 빨간 테두리 (고정 영역 상시 테두리가 이미 있으면 중복 생략)
+        if not (target == "지정 영역" and self.fixed_border):
+            self.video_border = RedBorder(self.root, region)
         self.video_btn.configure(text="■  녹화 정지", bg=C_RED, fg="#ffffff")
         self.video_btn._base_bg = C_RED
         self._update_mini_btns()
@@ -913,10 +990,11 @@ class CaptureApp:
             self.set_fixed_region(then=self.start_interval)
             return
         self.interval_running = True
-        # 캡처 중인 영역에 빨간 테두리 표시
-        border_region = self._target_region(target)
-        if border_region:
-            self.interval_border = RedBorder(self.root, border_region)
+        # 캡처 중인 영역에 빨간 테두리 표시 (고정 영역 상시 테두리가 있으면 중복 생략)
+        if not (target == "지정 영역" and self.fixed_border):
+            border_region = self._target_region(target)
+            if border_region:
+                self.interval_border = RedBorder(self.root, border_region)
         self.interval_btn.configure(text="■  정지", bg=C_GREEN, fg="#ffffff")
         self.interval_btn._base_bg = C_GREEN
         self._update_mini_btns()
@@ -956,7 +1034,7 @@ class CaptureApp:
             pass
         if self.recording and self.recorder:
             self.recorder.stop()
-        for b in (self.video_border, self.interval_border):
+        for b in (self.video_border, self.interval_border, self.fixed_border):
             if b:
                 b.destroy()
         if self.hotkey_listener:
@@ -1013,6 +1091,55 @@ class RedBorder:
             except Exception:
                 pass
         self.strips = []
+
+
+# ----------------------------------------------------------------------
+# 툴팁 (아이콘 위에 마우스 올리면 설명 표시)
+# ----------------------------------------------------------------------
+class Tooltip:
+    def __init__(self, widget, text, delay=500):
+        self.widget = widget
+        self.text = text
+        self.delay = delay
+        self.tip = None
+        self.after_id = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._leave, add="+")
+        widget.bind("<ButtonPress>", self._leave, add="+")
+
+    def _schedule(self, e=None):
+        self._unschedule()
+        self.after_id = self.widget.after(self.delay, self._show)
+
+    def _unschedule(self):
+        if self.after_id:
+            try:
+                self.widget.after_cancel(self.after_id)
+            except Exception:
+                pass
+            self.after_id = None
+
+    def _leave(self, e=None):
+        self._unschedule()
+        if self.tip:
+            self.tip.destroy()
+            self.tip = None
+
+    def _show(self):
+        if self.tip:
+            return
+        x = self.widget.winfo_rootx() + self.widget.winfo_width() // 2
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
+        self.tip = tk.Toplevel(self.widget)
+        self.tip.overrideredirect(True)
+        self.tip.attributes("-topmost", True)
+        lbl = tk.Label(self.tip, text=self.text, bg="#0b1220", fg=C_TEXT,
+                       font=("Segoe UI", 9), padx=8, pady=4,
+                       bd=1, relief="solid")
+        lbl.pack()
+        self.tip.update_idletasks()
+        w = self.tip.winfo_width()
+        self.tip.geometry(f"+{max(0, x - w // 2)}+{y}")
 
 
 # ----------------------------------------------------------------------

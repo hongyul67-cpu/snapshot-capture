@@ -52,6 +52,7 @@ DEFAULT_CONFIG = {
         "monitor":  "<ctrl>+<shift>+4",
         "video":    "<ctrl>+<shift>+5",
         "interval": "<ctrl>+<shift>+6",
+        "fixed":    "<ctrl>+<shift>+7",
     },
     "monitor_index": 1,             # 모니터 캡처 대상(1부터)
 }
@@ -353,6 +354,11 @@ class CaptureApp:
         grid.columnconfigure(0, weight=1)
         grid.columnconfigure(1, weight=1)
 
+        # 고정 영역 한 장 캡처 (재드래그 없이 고정된 영역 바로 캡처)
+        self._mkbtn(card, "📌  고정 영역 캡처", self.capture_fixed, bg=C_CARD2,
+                    hover=C_ACCENT, font=("Segoe UI", 10), pad=(0, 10)).pack(
+            fill="x", padx=18, pady=(2, 8))
+
         # 모니터 선택 드롭다운
         monrow = tk.Frame(card, bg=C_CARD)
         monrow.pack(fill="x", padx=14, pady=(0, 12))
@@ -460,6 +466,7 @@ class CaptureApp:
             ("region", "영역 선택"), ("fullscreen", "전체 화면"),
             ("window", "활성 창"), ("monitor", "모니터별"),
             ("video", "녹화 시작/정지"), ("interval", "연속 시작/정지"),
+            ("fixed", "고정영역 캡처"),
         ]
         hg = tk.Frame(hcard, bg=C_CARD)
         hg.pack(fill="x", padx=14, pady=(4, 12))
@@ -498,7 +505,8 @@ class CaptureApp:
         bar.pack(fill="both", expand=True, padx=6, pady=6)
         tk.Label(bar, text="📸", bg=C_BG, fg=C_TEXT,
                  font=("Segoe UI", 13)).pack(side="left", padx=(2, 6))
-        for txt, cmd, tip in [("⬚", self.capture_region, "영역 선택 캡처"),
+        for txt, cmd, tip in [("⬚", self.capture_region, "영역 선택 캡처 (매번 새로 드래그)"),
+                              ("📌", self.capture_fixed, "고정 영역 캡처 (재드래그 없이)"),
                               ("🖥", self.capture_fullscreen, "전체 화면 캡처"),
                               ("🪟", self.capture_window, "활성 창 캡처")]:
             b = self._mkbtn(bar, txt, cmd, font=("Segoe UI", 12), pad=(0, 5))
@@ -658,6 +666,7 @@ class CaptureApp:
             "monitor": self.capture_monitor,
             "video": self.toggle_video,
             "interval": self.toggle_interval,
+            "fixed": self.capture_fixed,
         }
         for key, combo in hk.items():
             if combo and key in actions:
@@ -849,6 +858,14 @@ class CaptureApp:
 
     def capture_monitor(self):
         self._capture_with_hide(self._selected_monitor_region)
+
+    def capture_fixed(self):
+        # 고정한 영역을 재드래그 없이 클릭 한 번에 캡처
+        if not self.interval_region:
+            self.set_status("먼저 캡처할 영역을 고정하세요")
+            self.set_fixed_region(then=self.capture_fixed)
+            return
+        self._capture_with_hide(lambda: dict(self.interval_region))
 
     def capture_region(self):
         # 선택하는 동안 본 프로그램 창을 숨김 → 캡처에 앱이 안 잡히도록

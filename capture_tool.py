@@ -256,7 +256,10 @@ class CaptureApp:
         self._interval_after = None
         self.hotkey_listener = None
         self._recording_edit = None  # 단축키 편집중인 필드
-        self.interval_region = self.cfg.get("interval_region")  # 연속 캡처 지정 영역
+        self.interval_region = self.cfg.get("interval_region")  # 공유 '지정 영역'(고정)
+        self.mini_mode = False
+        self.video_border = None      # 녹화 중 빨간 테두리
+        self.interval_border = None   # 연속 캡처 중 빨간 테두리
 
         root.title("SnapShot — 화면 캡처")
         root.configure(bg=C_BG)
@@ -314,7 +317,10 @@ class CaptureApp:
         return b
 
     def _build_ui(self):
-        root = self.root
+        # 전체 모드 컨텐츠는 full_wrap 안에 넣어 미니 모드 때 통째로 숨김
+        self.full_wrap = tk.Frame(self.root, bg=C_BG)
+        self.full_wrap.pack(fill="both", expand=True)
+        root = self.full_wrap
 
         # ---- 헤더 ----
         header = tk.Frame(root, bg=C_BG)
@@ -323,6 +329,8 @@ class CaptureApp:
                  font=("Segoe UI", 16, "bold")).pack(side="left")
         tk.Label(header, text="화면 캡처 도구", bg=C_BG, fg=C_SUB,
                  font=("Segoe UI", 9)).pack(side="left", padx=(8, 0), pady=(6, 0))
+        self._mkbtn(header, "🗕 작은 창", self.toggle_mini, bg=C_CARD2,
+                    hover=C_ACCENT, font=("Segoe UI", 9), pad=(0, 4)).pack(side="right")
 
         # ---- 캡처 모드 버튼 ----
         card = self._card(root, "캡처")
@@ -367,7 +375,7 @@ class CaptureApp:
         tk.Label(vrow, text="대상:", bg=C_CARD, fg=C_SUB,
                  font=("Segoe UI", 9)).pack(side="left", padx=(12, 4))
         self.video_target_var = tk.StringVar(value=self.cfg.get("video_target", "전체화면"))
-        vtargets = ["전체화면", "활성창"] + self.monitor_choices
+        vtargets = ["전체화면", "활성창", "지정 영역"] + self.monitor_choices
         ttk.Combobox(vrow, values=vtargets, textvariable=self.video_target_var,
                      state="readonly", width=10, font=("Segoe UI", 9)).pack(side="left")
         tk.Label(vrow, text="FPS", bg=C_CARD, fg=C_SUB,
@@ -399,7 +407,7 @@ class CaptureApp:
         itargets = ["전체화면", "활성창", "지정 영역"] + self.monitor_choices
         ttk.Combobox(irow, values=itargets, textvariable=self.interval_target_var,
                      state="readonly", width=8, font=("Segoe UI", 9)).pack(side="left", padx=4)
-        self._mkbtn(irow, "📍 영역 지정", lambda: self.set_interval_region(),
+        self._mkbtn(irow, "📍 영역 고정", lambda: self.set_fixed_region(),
                     bg=C_CARD2, hover=C_ACCENT, font=("Segoe UI", 9),
                     pad=(0, 5)).pack(side="left", padx=(2, 0))
 
@@ -415,6 +423,8 @@ class CaptureApp:
                  insertbackground=C_TEXT, relief="flat",
                  font=("Segoe UI", 9)).pack(side="left", fill="x", expand=True, padx=(0, 6))
         self._mkbtn(f1, "찾기", self.browse_dir, bg=C_CARD2, pad=(0, 4)).pack(side="left")
+        self._mkbtn(f1, "📂 열기", self.open_dir, bg=C_CARD2, hover=C_ACCENT,
+                    pad=(0, 4)).pack(side="left", padx=(4, 0))
         # 이름/포맷
         f2 = tk.Frame(scard, bg=C_CARD)
         f2.pack(fill="x", padx=14, pady=(4, 12))
@@ -469,6 +479,71 @@ class CaptureApp:
         self.status = tk.Label(root, text="준비됨", bg=C_CARD, fg=C_SUB,
                                anchor="w", font=("Segoe UI", 9), padx=16, pady=6)
         self.status.pack(fill="x", side="bottom")
+
+        # ---- 미니(요약) 바 : 평소엔 숨김 ----
+        self.mini_wrap = tk.Frame(self.root, bg=C_BG)
+        bar = tk.Frame(self.mini_wrap, bg=C_BG)
+        bar.pack(fill="both", expand=True, padx=6, pady=6)
+        tk.Label(bar, text="📸", bg=C_BG, fg=C_TEXT,
+                 font=("Segoe UI", 13)).pack(side="left", padx=(2, 6))
+        for txt, cmd in [("⬚", self.capture_region), ("🖥", self.capture_fullscreen),
+                         ("🪟", self.capture_window)]:
+            self._mkbtn(bar, txt, cmd, font=("Segoe UI", 12), pad=(0, 5)).pack(side="left", padx=2)
+        self.mini_video_btn = self._mkbtn(bar, "●", self.toggle_video, hover=C_RED,
+                                          font=("Segoe UI", 12, "bold"), pad=(0, 5))
+        self.mini_video_btn.pack(side="left", padx=2)
+        self.mini_interval_btn = self._mkbtn(bar, "▶", self.toggle_interval, hover=C_GREEN,
+                                             font=("Segoe UI", 12, "bold"), pad=(0, 5))
+        self.mini_interval_btn.pack(side="left", padx=2)
+        self._mkbtn(bar, "⤢", self.toggle_mini, hover=C_ACCENT,
+                    font=("Segoe UI", 12), pad=(0, 5)).pack(side="right", padx=2)
+
+    # ------------------------------------------------------------------
+    # 미니(요약) 모드
+    # ------------------------------------------------------------------
+    def toggle_mini(self):
+        self.exit_mini() if self.mini_mode else self.enter_mini()
+
+    def enter_mini(self):
+        self.mini_mode = True
+        self.full_wrap.pack_forget()
+        self.mini_wrap.pack(fill="both", expand=True)
+        self.root.attributes("-topmost", True)
+        self._update_mini_btns()
+        self.root.update_idletasks()
+        self.root.geometry("")  # 미니 바 크기에 딱 맞게 축소
+
+    def exit_mini(self):
+        self.mini_mode = False
+        self.mini_wrap.pack_forget()
+        self.full_wrap.pack(fill="both", expand=True)
+        self.root.attributes("-topmost", False)
+        self.root.update_idletasks()
+        self.root.geometry("")  # 자동 크기 복원
+
+    def _update_mini_btns(self):
+        if not hasattr(self, "mini_video_btn"):
+            return
+        if self.recording:
+            self.mini_video_btn.configure(text="■", bg=C_RED, fg="#ffffff")
+            self.mini_video_btn._base_bg = C_RED
+        else:
+            self.mini_video_btn.configure(text="●", bg=C_CARD2, fg=C_TEXT)
+            self.mini_video_btn._base_bg = C_CARD2
+        if self.interval_running:
+            self.mini_interval_btn.configure(text="■", bg=C_GREEN, fg="#ffffff")
+            self.mini_interval_btn._base_bg = C_GREEN
+        else:
+            self.mini_interval_btn.configure(text="▶", bg=C_CARD2, fg=C_TEXT)
+            self.mini_interval_btn._base_bg = C_CARD2
+
+    def open_dir(self):
+        d = self.dir_var.get().strip() or DEFAULT_CONFIG["save_dir"]
+        try:
+            os.makedirs(d, exist_ok=True)
+            os.startfile(d)
+        except Exception as e:
+            self.set_status(f"폴더 열기 실패: {e}", C_RED)
 
     def _add_placeholder(self, entry, var, text):
         def on_focus_in(e):
@@ -717,24 +792,26 @@ class CaptureApp:
 
     def _finish_region(self, region):
         self._do_capture(region, flash=True)
+        # 방금 선택한 영역을 '고정 영역'으로 저장 → 영상/연속에서 재사용(고정 유지)
+        self.interval_region = region
+        save_config(self._collect_cfg())
         self.root.deiconify()
 
-    def set_interval_region(self, then_start=False):
-        """연속 캡처용 '지정 영역'을 드래그로 설정 (창 숨김 상태로 선택)"""
+    def set_fixed_region(self, then=None):
+        """공유 '지정(고정) 영역'을 드래그로 설정. then: 설정 후 실행할 콜백."""
         self.root.withdraw()
 
         def cb(region):
             self.root.deiconify()
             if region:
                 self.interval_region = region
-                self.interval_target_var.set("지정 영역")
                 save_config(self._collect_cfg())
                 self.set_status(
-                    f"지정 영역 설정됨 · {region['width']}×{region['height']}", C_GREEN)
-                if then_start:
-                    self.start_interval()
+                    f"영역 고정됨 · {region['width']}×{region['height']}", C_GREEN)
+                if then:
+                    then()
             else:
-                self.set_status("영역 지정 취소됨")
+                self.set_status("영역 고정 취소됨")
 
         self.root.after(160, lambda: RegionSelector(self.root, cb))
 
@@ -772,6 +849,11 @@ class CaptureApp:
     def start_video(self):
         self._collect_cfg()
         target = self.video_target_var.get()
+        # '지정 영역' 인데 아직 고정 영역이 없으면 먼저 지정받고 녹화 시작
+        if target == "지정 영역" and not self.interval_region:
+            self.set_status("먼저 녹화할 영역을 드래그하세요")
+            self.set_fixed_region(then=self.start_video)
+            return
         region = self._target_region(target)
         if not region:
             self.set_status("녹화 대상을 찾을 수 없습니다", C_RED)
@@ -783,16 +865,22 @@ class CaptureApp:
             on_state=lambda s: self.root.after(0, lambda: self._on_video_state(s, path)))
         self.recorder.start()
         self.recording = True
+        self.video_border = RedBorder(self.root, region)  # 촬영 영역 빨간 테두리
         self.video_btn.configure(text="■  녹화 정지", bg=C_RED, fg="#ffffff")
         self.video_btn._base_bg = C_RED
+        self._update_mini_btns()
         self.set_status(f"● 녹화 중... ({target})", C_RED)
 
     def stop_video(self):
         if self.recorder:
             self.recorder.stop()
         self.recording = False
+        if self.video_border:
+            self.video_border.destroy()
+            self.video_border = None
         self.video_btn.configure(text="●  녹화 시작", bg=C_CARD2, fg=C_TEXT)
         self.video_btn._base_bg = C_CARD2
+        self._update_mini_btns()
         self.set_status("녹화 저장 중...", C_SUB)
 
     def _on_video_state(self, state, path):
@@ -800,7 +888,11 @@ class CaptureApp:
             self.set_status(f"동영상 저장됨 · {os.path.basename(path)}", C_GREEN)
         elif state == "error":
             self.recording = False
+            if self.video_border:
+                self.video_border.destroy()
+                self.video_border = None
             self.video_btn.configure(text="●  녹화 시작", bg=C_CARD2, fg=C_TEXT)
+            self._update_mini_btns()
             self.set_status("녹화 오류(ffmpeg)", C_RED)
 
     # ------------------------------------------------------------------
@@ -814,14 +906,20 @@ class CaptureApp:
 
     def start_interval(self):
         self._collect_cfg()
+        target = self.interval_target_var.get()
         # '지정 영역' 대상인데 아직 영역이 없으면 먼저 지정받고 시작
-        if self.interval_target_var.get() == "지정 영역" and not self.interval_region:
+        if target == "지정 영역" and not self.interval_region:
             self.set_status("먼저 캡처할 영역을 드래그하세요")
-            self.set_interval_region(then_start=True)
+            self.set_fixed_region(then=self.start_interval)
             return
         self.interval_running = True
+        # 캡처 중인 영역에 빨간 테두리 표시
+        border_region = self._target_region(target)
+        if border_region:
+            self.interval_border = RedBorder(self.root, border_region)
         self.interval_btn.configure(text="■  정지", bg=C_GREEN, fg="#ffffff")
         self.interval_btn._base_bg = C_GREEN
+        self._update_mini_btns()
         self._interval_tick(first=True)
 
     def stop_interval(self):
@@ -831,8 +929,12 @@ class CaptureApp:
                 self.root.after_cancel(self._interval_after)
             except Exception:
                 pass
+        if self.interval_border:
+            self.interval_border.destroy()
+            self.interval_border = None
         self.interval_btn.configure(text="▶  시작", bg=C_CARD2, fg=C_TEXT)
         self.interval_btn._base_bg = C_CARD2
+        self._update_mini_btns()
         self.set_status("연속 캡처 정지됨")
 
     def _interval_tick(self, first=False):
@@ -854,12 +956,63 @@ class CaptureApp:
             pass
         if self.recording and self.recorder:
             self.recorder.stop()
+        for b in (self.video_border, self.interval_border):
+            if b:
+                b.destroy()
         if self.hotkey_listener:
             try:
                 self.hotkey_listener.stop()
             except Exception:
                 pass
         self.root.destroy()
+
+
+# ----------------------------------------------------------------------
+# 캡처/녹화 중인 영역 가장자리 빨간 테두리 (클릭 통과, 캡처 영역 바깥에 표시)
+# ----------------------------------------------------------------------
+class RedBorder:
+    def __init__(self, root, region, thickness=3, color="#ff2d2d"):
+        self.strips = []
+        l, t = region["left"], region["top"]
+        w, h = region["width"], region["height"]
+        k = thickness
+        # 캡처 영역 '바깥쪽'에 테두리를 그려 촬영본에는 안 잡히도록
+        rects = [
+            (l - k, t - k, w + 2 * k, k),   # 상
+            (l - k, t + h, w + 2 * k, k),   # 하
+            (l - k, t,     k, h),           # 좌
+            (l + w, t,     k, h),           # 우
+        ]
+        for (x, y, ww, hh) in rects:
+            s = tk.Toplevel(root)
+            s.overrideredirect(True)
+            s.attributes("-topmost", True)
+            s.configure(bg=color)
+            s.geometry(f"{max(1, ww)}x{max(1, hh)}+{x}+{y}")
+            try:
+                s.update_idletasks()
+                self._clickthrough(s)
+            except Exception:
+                pass
+            self.strips.append(s)
+
+    def _clickthrough(self, win):
+        GWL_EXSTYLE = -20
+        WS_EX_LAYERED = 0x00080000
+        WS_EX_TRANSPARENT = 0x00000020
+        u = ctypes.windll.user32
+        hwnd = u.GetParent(win.winfo_id()) or win.winfo_id()
+        style = u.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        u.SetWindowLongW(hwnd, GWL_EXSTYLE,
+                         style | WS_EX_LAYERED | WS_EX_TRANSPARENT)
+
+    def destroy(self):
+        for s in self.strips:
+            try:
+                s.destroy()
+            except Exception:
+                pass
+        self.strips = []
 
 
 # ----------------------------------------------------------------------
